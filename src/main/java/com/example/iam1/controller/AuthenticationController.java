@@ -1,4 +1,4 @@
-package com.example.iam1.api;
+package com.example.iam1.controller;
 
 import com.example.iam1.model.request.LoginRequest;
 import com.example.iam1.model.response.LoginResponse;

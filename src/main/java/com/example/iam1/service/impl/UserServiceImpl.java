@@ -8,24 +8,31 @@ import com.example.iam1.exception.InvalidTokenException;
 import com.example.iam1.exception.InvalidUserID;
 import com.example.iam1.exception.UserNotFoundException;
 import com.example.iam1.model.JwtInfo;
+import com.example.iam1.model.OTP;
 import com.example.iam1.model.RedisToken;
 import com.example.iam1.model.dto.PasswordDTO;
 import com.example.iam1.model.dto.UserDTO;
+import com.example.iam1.model.request.VerifyOtpRequest;
 import com.example.iam1.model.response.UserProfile;
+import com.example.iam1.repository.OtpRepository;
 import com.example.iam1.repository.RedisTokenRepository;
 import com.example.iam1.repository.RoleRepository;
 import com.example.iam1.repository.UserRepository;
 import com.example.iam1.service.JWTService;
+import com.example.iam1.service.MailService;
 import com.example.iam1.service.UserService;
+import jakarta.mail.MessagingException;
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.text.ParseException;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Optional;
+import java.util.Random;
 
 @Service
 public class UserServiceImpl implements UserService {
@@ -45,13 +52,20 @@ public class UserServiceImpl implements UserService {
     @Autowired
     private JWTService jwtService;
 
+    @Autowired
+    private MailService mailService;
+
+
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
     @Autowired
     private RedisTokenRepository redisTokenRepository;
 
+    @Autowired
+    private OtpRepository otpRepository;
+
     @Override
-    public UserDTO register(UserDTO userDTO) {
+    public UserDTO register(UserDTO userDTO) throws MessagingException {
         if (userRepository.existsByEmail(userDTO.getEmail())) {
             throw new DuplicateEmailException("Email đã tồn tại");
         }
@@ -63,6 +77,7 @@ public class UserServiceImpl implements UserService {
         userEntity.setActive(true);
 
         userRepository.save(userEntity);
+        mailService.sendEmailRegister(userDTO.getEmail());
 
         return userDTO;
     }
@@ -160,6 +175,55 @@ public class UserServiceImpl implements UserService {
         }
         return false;
     }
+
+    @Override
+    public void sendOtp(String token) throws ParseException, MessagingException {
+        String email = jwtService.getSubject(token);
+        String otp = String.format("%06d", new Random().nextInt(999999));
+
+        OTP newOTP = new OTP(email, otp, 120);
+        otpRepository.save(newOTP);
+
+        mailService.sendOtp(email, otp);
+    }
+
+    @Override
+    public boolean verifyOtpAndChangePassword(String token, String refreshToken, VerifyOtpRequest verifyOtpRequest) {
+        String otp = verifyOtpRequest.getOtp();
+        String newPassword = verifyOtpRequest.getNewPassword();
+
+        try {
+            String email = jwtService.getSubject(token);
+
+            //Lấy OTP từ Redis
+            Optional<OTP> optionalOtp = otpRepository.findById(email);
+            if (optionalOtp.isEmpty()) {
+                throw new RuntimeException("OTP đã hết hạn hoặc không tồn tại");
+            }
+
+            OTP savedOtp = optionalOtp.get();
+
+            if (!savedOtp.getOtp().equals(otp)) {
+                throw new RuntimeException("OTP không đúng");
+            }
+
+            UserEntity userEntity = userRepository.findByEmail(email);
+
+            userEntity.setPassword(passwordEncoder.encode(newPassword));
+            userRepository.save(userEntity);
+
+            // Xóa OTP khỏi Redis
+            otpRepository.deleteById(email);
+
+            revokeToken(token,refreshToken);
+
+            return true;
+
+        } catch (ParseException e) {
+            throw new InvalidTokenException("Token không hợp lệ");
+        }
+    }
+
 
     public void revokeToken(String accessToken,String refreshToken) throws ParseException{
         JwtInfo accessJwtInfo = jwtService.parseToken(accessToken);
